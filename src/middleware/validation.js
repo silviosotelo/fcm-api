@@ -12,7 +12,7 @@ const notificationSchema = Joi.object({
     "any.required": "El título es requerido",
     "string.max": "El título no puede exceder 100 caracteres",
   }),
-  message: Joi.string().required().max(500).messages({
+  message: Joi.string().required().max(1000).messages({
     "string.empty": "El mensaje es requerido",
     "any.required": "El mensaje es requerido",
     "string.max": "El mensaje no puede exceder 500 caracteres",

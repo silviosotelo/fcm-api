@@ -100,7 +100,7 @@ class FirebaseService {
 
       for (let i = 0; i < messages.length; i += batchSize) {
         const batch = messages.slice(i, i + batchSize)
-        const batchResponse = await this.messaging.sendAll(batch)
+        const batchResponse = await this.messaging.sendEach(batch)
 
         results.push(
           ...batchResponse.responses.map((response, index) => ({

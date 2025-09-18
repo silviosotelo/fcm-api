@@ -1,19 +1,17 @@
 const express = require("express")
 const notificationService = require("../services/notificationService")
-const queueManager = require("../queues/notificationQueue")
 const { validateNotification, validateBatchNotifications, validateHistoryQuery } = require("../middleware/validation")
 const logger = require("../utils/logger")
 
 const router = express.Router()
 
-// Enviar notificación individual
+// Enviar notificación individual (inmediata o programada)
 router.post("/send", validateNotification, async (req, res) => {
   try {
-    const result = await notificationService.createNotification(req.body)
+    const result = await notificationService.createAndSendNotification(req.body)
 
     res.status(201).json({
       success: true,
-      message: "Notificación agregada a la cola exitosamente",
       data: result,
     })
   } catch (error) {
@@ -30,7 +28,7 @@ router.post("/send", validateNotification, async (req, res) => {
     res.status(500).json({
       success: false,
       error: "Error interno del servidor",
-      message: "No se pudo procesar la notificación",
+      message: error.message,
     })
   }
 })
@@ -38,11 +36,10 @@ router.post("/send", validateNotification, async (req, res) => {
 // Enviar lote de notificaciones
 router.post("/send-batch", validateBatchNotifications, async (req, res) => {
   try {
-    const result = await notificationService.createBatchNotifications(req.body.notifications)
+    const result = await notificationService.createAndSendBatchNotifications(req.body.notifications)
 
     res.status(201).json({
       success: true,
-      message: "Lote de notificaciones agregado a la cola exitosamente",
       data: result,
     })
   } catch (error) {
@@ -51,7 +48,27 @@ router.post("/send-batch", validateBatchNotifications, async (req, res) => {
     res.status(500).json({
       success: false,
       error: "Error interno del servidor",
-      message: "No se pudo procesar el lote de notificaciones",
+      message: error.message,
+    })
+  }
+})
+
+// Procesar notificaciones programadas manualmente
+router.post("/process-scheduled", async (req, res) => {
+  try {
+    const result = await notificationService.processScheduledNotifications()
+
+    res.json({
+      success: true,
+      data: result,
+    })
+  } catch (error) {
+    logger.error("Error en endpoint /process-scheduled:", error)
+
+    res.status(500).json({
+      success: false,
+      error: "Error interno del servidor",
+      message: "No se pudieron procesar las notificaciones programadas",
     })
   }
 })

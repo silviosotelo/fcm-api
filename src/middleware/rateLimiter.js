@@ -5,7 +5,7 @@ const logger = require("../utils/logger")
 // Rate limiter para endpoints generales
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 100, // máximo 100 requests por ventana
+  max: 1000, // máximo 100 requests por ventana
   message: {
     success: false,
     error: "Demasiadas solicitudes",
@@ -27,7 +27,7 @@ const generalLimiter = rateLimit({
 // Rate limiter más estricto para envío de notificaciones
 const notificationLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minuto
-  max: 10, // máximo 10 notificaciones por minuto
+  max: 1000, // máximo 10 notificaciones por minuto
   message: {
     success: false,
     error: "Límite de notificaciones excedido",
@@ -49,7 +49,7 @@ const notificationLimiter = rateLimit({
 // Rate limiter para lotes de notificaciones
 const batchLimiter = rateLimit({
   windowMs: 5 * 60 * 1000, // 5 minutos
-  max: 3, // máximo 3 lotes por 5 minutos
+  max: 1000, // máximo 3 lotes por 5 minutos
   message: {
     success: false,
     error: "Límite de lotes excedido",
@@ -71,7 +71,7 @@ const batchLimiter = rateLimit({
 // Rate limiter para endpoints administrativos
 const adminLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 20, // máximo 20 requests por ventana
+  max: 1000, // máximo 20 requests por ventana
   message: {
     success: false,
     error: "Límite administrativo excedido",

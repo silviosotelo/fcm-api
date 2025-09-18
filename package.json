@@ -1,55 +1,37 @@
 {
-  "name": "fcm-push-api",
+  "name": "fcm-push-api-direct",
   "version": "1.0.0",
-  "description": "Complete API for Firebase Cloud Messaging push notifications",
+  "description": "API simplificada para Firebase Cloud Messaging push notifications (sin workers)",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "init-db": "node src/database/init.js",
-    "worker": "node src/workers/notificationWorker.js",
-    "scheduled-worker": "node src/workers/scheduledWorker.js"
+    "process-scheduled": "curl -X POST http://localhost:3000/api/process-scheduled -H 'X-API-Key: your-api-key'"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "firebase-admin": "^12.0.0",
-    "sqlite3": "^5.1.6",
-    "bull": "^4.12.2",
-    "redis": "^4.6.13",
-    "joi": "^17.12.2",
-    "winston": "^3.11.0",
     "cors": "^2.8.5",
-    "helmet": "^7.1.0",
     "dotenv": "^16.4.5",
-    "node-cron": "^3.0.3",
+    "express": "^4.18.2",
     "express-rate-limit": "^7.1.5",
+    "firebase-admin": "^12.0.0",
     "fs": "0.0.1-security",
+    "helmet": "^7.1.0",
+    "joi": "^17.12.2",
     "path": "0.12.7",
-    "next": "15.5.3",
-    "react": "19.1.1",
-    "react-dom": "19.1.1",
-    "class-variance-authority": "0.7.1",
-    "clsx": "2.1.1",
-    "lucide-react": "0.544.0",
-    "tailwind-merge": "3.3.1",
-    "tailwindcss-animate": "1.0.7",
-    "axios": "1.12.2"
+    "sqlite3": "^5.1.6",
+    "winston": "^3.11.0"
   },
   "devDependencies": {
-    "nodemon": "^3.0.3",
-    "@types/react": "19.1.13",
-    "@types/react-dom": "19.1.9",
-    "@types/node": "24.5.1",
-    "tailwindcss": "^4.1.9",
-    "typescript": "5.9.2",
-    "postcss": "8.5.6"
+    "nodemon": "^3.0.3"
   },
   "keywords": [
     "fcm",
     "push-notifications",
     "firebase",
     "api",
-    "nodejs"
+    "nodejs",
+    "direct-processing"
   ],
   "author": "FCM API Developer",
   "license": "MIT"

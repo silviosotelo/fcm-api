@@ -1,10 +1,9 @@
 const db = require("../database/connection")
 const firebaseService = require("./firebaseService")
-const queueManager = require("../queues/notificationQueue")
 const logger = require("../utils/logger")
 
 class NotificationService {
-  async createNotification(notificationData) {
+  async createAndSendNotification(notificationData) {
     try {
       if (!db.db) {
         await db.connect()
@@ -20,99 +19,8 @@ class NotificationService {
         scheduledAt,
       } = notificationData
 
-      // Validar token antes de crear la notificación
-      const tokenValidation = await firebaseService.validateToken(fcmToken)
-      if (!tokenValidation.valid && tokenValidation.isTokenInvalid) {
-        await this.markTokenAsInvalid(fcmToken, tokenValidation.error)
-        throw new Error(`Token FCM inválido: ${tokenValidation.error}`)
-      }
-
-      // Insertar en base de datos
-      const result = await db.run(
-        `INSERT INTO pending_notifications 
-         (fcm_token, title, message, additional_data, notification_type, priority, scheduled_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [
-          fcmToken,
-          title,
-          message,
-          additionalData ? JSON.stringify(additionalData) : null,
-          notificationType,
-          priority,
-          scheduledAt || new Date().toISOString(),
-        ],
-      )
-
-      const notificationId = result.id
-
-      // Agregar a la cola
-      const delay = scheduledAt ? new Date(scheduledAt).getTime() - Date.now() : 0
-      await queueManager.addSingleNotification(
-        {
-          id: notificationId,
-          fcmToken,
-          title,
-          message,
-          additionalData,
-          notificationType,
-          priority,
-        },
-        { delay: Math.max(0, delay) },
-      )
-
-      logger.info(`Notificación creada y agregada a la cola: ${notificationId}`)
-
-      return {
-        id: notificationId,
-        status: "queued",
-        scheduledAt: scheduledAt || new Date().toISOString(),
-      }
-    } catch (error) {
-      logger.error("Error al crear notificación:", error)
-      throw error
-    }
-  }
-
-  async createBatchNotifications(notifications) {
-    try {
-      if (!db.db) {
-        await db.connect()
-      }
-
-      const validNotifications = []
-      const invalidTokens = []
-
-      // Validar todos los tokens primero
-      for (const notification of notifications) {
-        const tokenValidation = await firebaseService.validateToken(notification.fcmToken)
-        if (!tokenValidation.valid && tokenValidation.isTokenInvalid) {
-          await this.markTokenAsInvalid(notification.fcmToken, tokenValidation.error)
-          invalidTokens.push({
-            token: notification.fcmToken,
-            error: tokenValidation.error,
-          })
-        } else {
-          validNotifications.push(notification)
-        }
-      }
-
-      if (validNotifications.length === 0) {
-        throw new Error("No hay notificaciones válidas para procesar")
-      }
-
-      // Insertar notificaciones válidas en la base de datos
-      const insertedNotifications = []
-      for (const notification of validNotifications) {
-        const {
-          fcmToken,
-          title,
-          message,
-          additionalData,
-          notificationType = "notification",
-          priority = "normal",
-          scheduledAt,
-        } = notification
-
+      // Si está programada para el futuro, insertar en pending
+      if (scheduledAt && new Date(scheduledAt) > new Date()) {
         const result = await db.run(
           `INSERT INTO pending_notifications 
            (fcm_token, title, message, additional_data, notification_type, priority, scheduled_at)
@@ -124,36 +32,290 @@ class NotificationService {
             additionalData ? JSON.stringify(additionalData) : null,
             notificationType,
             priority,
-            scheduledAt || new Date().toISOString(),
+            scheduledAt,
           ],
         )
 
-        insertedNotifications.push({
+        logger.info(`Notificación programada creada: ${result.id}`)
+        
+        return {
           id: result.id,
-          fcmToken,
-          title,
-          message,
-          additionalData,
-          notificationType,
-          priority,
-        })
+          status: "scheduled",
+          scheduledAt: scheduledAt,
+          message: "Notificación programada exitosamente"
+        }
       }
 
-      // Agregar lote a la cola
-      await queueManager.addBatchNotifications(insertedNotifications)
+      // Enviar inmediatamente
+      const sendResult = await firebaseService.sendNotification(notificationData)
 
-      logger.info(`Lote de ${insertedNotifications.length} notificaciones creado y agregado a la cola`)
+      // Guardar en historial
+      await this.saveToHistory({
+        fcmToken,
+        title,
+        message,
+        additionalData,
+        notificationType,
+        priority,
+        status: sendResult.success ? "sent" : (sendResult.isTokenInvalid ? "invalid_token" : "failed"),
+        attempts: 1,
+        responseData: sendResult.messageId ? JSON.stringify({ messageId: sendResult.messageId }) : null,
+        errorMessage: sendResult.error || null
+      })
+
+      if (sendResult.success) {
+        logger.info("Notificación enviada exitosamente")
+        return {
+          status: "sent",
+          messageId: sendResult.messageId,
+          message: "Notificación enviada exitosamente"
+        }
+      } else {
+        logger.error("Error al enviar notificación:", sendResult.error)
+        
+        if (sendResult.isTokenInvalid) {
+          await this.markTokenAsInvalid(fcmToken, sendResult.error)
+        }
+        
+        throw new Error(`Error al enviar notificación: ${sendResult.error}`)
+      }
+    } catch (error) {
+      logger.error("Error al crear y enviar notificación:", error)
+      throw error
+    }
+  }
+
+  async createAndSendBatchNotifications(notifications) {
+    try {
+      if (!db.db) {
+        await db.connect()
+      }
+
+      logger.info(`Procesando lote de ${notifications.length} notificaciones`)
+
+      const results = {
+        successful: 0,
+        failed: 0,
+        invalidTokens: 0,
+        details: []
+      }
+
+      // Procesar en lotes de 500 (límite de FCM)
+      const batchSize = 500
+      for (let i = 0; i < notifications.length; i += batchSize) {
+        const batch = notifications.slice(i, i + batchSize)
+        
+        try {
+          const batchResult = await firebaseService.sendBatchNotifications(batch)
+          
+          // Procesar resultados individuales
+          for (let j = 0; j < batchResult.results.length; j++) {
+            const notificationResult = batchResult.results[j]
+            const originalNotification = batch[j]
+            
+            const status = notificationResult.success ? "sent" : 
+                          (notificationResult.error && this.isTokenInvalid(notificationResult.error) ? "invalid_token" : "failed")
+            
+            // Guardar en historial
+            await this.saveToHistory({
+              fcmToken: originalNotification.fcmToken,
+              title: originalNotification.title,
+              message: originalNotification.message,
+              additionalData: originalNotification.additionalData,
+              notificationType: originalNotification.notificationType || "notification",
+              priority: originalNotification.priority || "normal",
+              status,
+              attempts: 1,
+              responseData: notificationResult.messageId ? JSON.stringify({ messageId: notificationResult.messageId }) : null,
+              errorMessage: notificationResult.error?.message || null
+            })
+
+            // Contar resultados
+            if (notificationResult.success) {
+              results.successful++
+            } else if (status === "invalid_token") {
+              results.invalidTokens++
+              await this.markTokenAsInvalid(originalNotification.fcmToken, notificationResult.error?.message)
+            } else {
+              results.failed++
+            }
+
+            results.details.push({
+              token: originalNotification.fcmToken,
+              status,
+              messageId: notificationResult.messageId || null,
+              error: notificationResult.error?.message || null
+            })
+          }
+        } catch (error) {
+          logger.error(`Error en lote ${Math.floor(i / batchSize) + 1}:`, error)
+          
+          // Marcar todo el lote como fallido
+          for (const notification of batch) {
+            await this.saveToHistory({
+              fcmToken: notification.fcmToken,
+              title: notification.title,
+              message: notification.message,
+              additionalData: notification.additionalData,
+              notificationType: notification.notificationType || "notification",
+              priority: notification.priority || "normal",
+              status: "failed",
+              attempts: 1,
+              responseData: null,
+              errorMessage: error.message
+            })
+            
+            results.failed++
+            results.details.push({
+              token: notification.fcmToken,
+              status: "failed",
+              error: error.message
+            })
+          }
+        }
+      }
+
+      logger.info(`Lote completado: ${results.successful} exitosas, ${results.failed} fallidas, ${results.invalidTokens} tokens inválidos`)
 
       return {
         totalRequested: notifications.length,
-        validNotifications: insertedNotifications.length,
-        invalidTokens: invalidTokens.length,
-        invalidTokenDetails: invalidTokens,
-        status: "queued",
+        successful: results.successful,
+        failed: results.failed,
+        invalidTokens: results.invalidTokens,
+        details: results.details,
+        message: "Lote procesado exitosamente"
       }
     } catch (error) {
-      logger.error("Error al crear lote de notificaciones:", error)
+      logger.error("Error al crear y enviar lote de notificaciones:", error)
       throw error
+    }
+  }
+
+  async processScheduledNotifications() {
+    try {
+      if (!db.db) {
+        await db.connect()
+      }
+
+      const now = new Date().toISOString()
+
+      // Buscar notificaciones que deben enviarse ahora
+      const scheduledNotifications = await db.all(
+        `SELECT * FROM pending_notifications 
+         WHERE status = 'pending' 
+         AND scheduled_at <= ? 
+         ORDER BY priority DESC, scheduled_at ASC
+         LIMIT 100`,
+        [now],
+      )
+
+      if (scheduledNotifications.length === 0) {
+        return { processed: 0, message: "No hay notificaciones programadas para procesar" }
+      }
+
+      logger.info(`Procesando ${scheduledNotifications.length} notificaciones programadas`)
+
+      let successful = 0
+      let failed = 0
+
+      for (const notification of scheduledNotifications) {
+        try {
+          const result = await firebaseService.sendNotification({
+            fcmToken: notification.fcm_token,
+            title: notification.title,
+            message: notification.message,
+            additionalData: notification.additional_data,
+            notificationType: notification.notification_type,
+            priority: notification.priority
+          })
+
+          const status = result.success ? "sent" : (result.isTokenInvalid ? "invalid_token" : "failed")
+
+          // Guardar en historial
+          await this.saveToHistory({
+            originalId: notification.id,
+            fcmToken: notification.fcm_token,
+            title: notification.title,
+            message: notification.message,
+            additionalData: notification.additional_data,
+            notificationType: notification.notification_type,
+            priority: notification.priority,
+            status,
+            attempts: 1,
+            responseData: result.messageId ? JSON.stringify({ messageId: result.messageId }) : null,
+            errorMessage: result.error || null
+          })
+
+          // Eliminar de pendientes
+          await db.run(`DELETE FROM pending_notifications WHERE id = ?`, [notification.id])
+
+          if (result.success) {
+            successful++
+          } else {
+            failed++
+            if (result.isTokenInvalid) {
+              await this.markTokenAsInvalid(notification.fcm_token, result.error)
+            }
+          }
+
+        } catch (error) {
+          logger.error(`Error procesando notificación programada ${notification.id}:`, error)
+          failed++
+          
+          // Marcar como fallida
+          await this.saveToHistory({
+            originalId: notification.id,
+            fcmToken: notification.fcm_token,
+            title: notification.title,
+            message: notification.message,
+            additionalData: notification.additional_data,
+            notificationType: notification.notification_type,
+            priority: notification.priority,
+            status: "failed",
+            attempts: 1,
+            responseData: null,
+            errorMessage: error.message
+          })
+
+          await db.run(`DELETE FROM pending_notifications WHERE id = ?`, [notification.id])
+        }
+      }
+
+      return {
+        processed: scheduledNotifications.length,
+        successful,
+        failed,
+        message: `Procesadas ${scheduledNotifications.length} notificaciones programadas`
+      }
+    } catch (error) {
+      logger.error("Error procesando notificaciones programadas:", error)
+      throw error
+    }
+  }
+
+  async saveToHistory(data) {
+    try {
+      await db.run(
+        `INSERT INTO notification_history 
+         (original_id, fcm_token, title, message, additional_data, notification_type, priority, 
+          status, attempts, response_data, error_message)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          data.originalId || null,
+          data.fcmToken,
+          data.title,
+          data.message,
+          data.additionalData,
+          data.notificationType,
+          data.priority,
+          data.status,
+          data.attempts,
+          data.responseData,
+          data.errorMessage,
+        ],
+      )
+    } catch (error) {
+      logger.error("Error guardando en historial:", error)
     }
   }
 
@@ -166,9 +328,22 @@ class NotificationService {
     }
   }
 
+  isTokenInvalid(error) {
+    if (!error) return false
+    const errorMessage = error.message?.toLowerCase() || ""
+    const errorCode = error.code || ""
+    
+    const invalidTokenCodes = ["messaging/invalid-registration-token", "messaging/registration-token-not-registered"]
+    return invalidTokenCodes.includes(errorCode) || 
+           errorMessage.includes("not registered") || 
+           errorMessage.includes("invalid token")
+  }
+
   async getNotificationHistory(filters = {}) {
     try {
-      await db.connect()
+      if (!db.db) {
+        await db.connect()
+      }
 
       let query = `SELECT * FROM notification_history WHERE 1=1`
       const params = []
@@ -210,7 +385,9 @@ class NotificationService {
 
   async getPendingNotifications() {
     try {
-      await db.connect()
+      if (!db.db) {
+        await db.connect()
+      }
 
       const pending = await db.all(
         `SELECT * FROM pending_notifications 
@@ -227,7 +404,9 @@ class NotificationService {
 
   async getNotificationStats() {
     try {
-      await db.connect()
+      if (!db.db) {
+        await db.connect()
+      }
 
       const stats = await db.get(`
         SELECT 
@@ -245,12 +424,10 @@ class NotificationService {
         WHERE status = 'pending'
       `)
 
-      const queueStats = await queueManager.getQueueStats()
-
       return {
         today: stats,
         pending: pendingCount.pending,
-        queues: queueStats,
+        message: "Sin sistema de colas - procesamiento directo"
       }
     } catch (error) {
       logger.error("Error al obtener estadísticas:", error)

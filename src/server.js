@@ -1,18 +1,17 @@
 const express = require("express")
 const cors = require("cors")
-const helmet = require("helmet")
 const path = require("path")
 require("dotenv").config()
 
 const logger = require("./utils/logger")
 const { initDatabase } = require("./database/init")
 const { globalErrorHandler, setupGlobalErrorHandlers, catchAsync } = require("./utils/errorHandler")
-const { securityConfig, securityLogger } = require("./middleware/security")
-const { generalLimiter } = require("./middleware/rateLimiter")
+const { securityConfig, securityLogger, authenticateApiKey } = require("./middleware/security")
+const { generalLimiter, notificationLimiter, batchLimiter } = require("./middleware/rateLimiter")
 
 // Importar rutas
 const notificationRoutes = require("./routes/notifications")
-const adminRoutes = require("./routes/admin")
+const notificationService = require("./services/notificationService")
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -45,11 +44,17 @@ app.use((req, res, next) => {
   next()
 })
 
+// Aplicar autenticación solo a las rutas de la API
+app.use("/api", authenticateApiKey)
+
+// Rate limiters específicos para diferentes endpoints
+app.use("/api/notifications/send", notificationLimiter)
+app.use("/api/notifications/send-batch", batchLimiter)
+
 // Rutas principales
 app.use("/api/notifications", notificationRoutes)
-app.use("/api/admin", adminRoutes)
 
-// Ruta de salud
+// Ruta de salud (sin autenticación)
 app.get(
   "/health",
   catchAsync(async (req, res) => {
@@ -59,35 +64,53 @@ app.get(
       uptime: process.uptime(),
       version: "1.0.0",
       environment: process.env.NODE_ENV || "development",
+      mode: "direct-processing" // Indicar que no usa workers
     })
   }),
 )
 
-// Ruta raíz con documentación básica
+// Endpoint para procesar notificaciones programadas manualmente (cron alternativo)
+app.post(
+  "/api/process-scheduled",
+  authenticateApiKey,
+  catchAsync(async (req, res) => {
+    const result = await notificationService.processScheduledNotifications()
+    res.json({
+      success: true,
+      data: result
+    })
+  })
+)
+
+// Ruta raíz con documentación básica (sin autenticación)
 app.get("/", (req, res) => {
   res.json({
-    name: "FCM Push Notifications API",
+    name: "FCM Push Notifications API - Direct Mode",
     version: "1.0.0",
-    description: "API completa para envío de notificaciones push a Firebase Cloud Messaging",
+    description: "API simplificada para envío directo de notificaciones push a Firebase Cloud Messaging",
+    mode: "direct-processing",
     endpoints: {
       notifications: {
-        "POST /api/notifications/send": "Enviar notificación individual",
+        "POST /api/notifications/send": "Enviar notificación individual (inmediata o programada)",
         "POST /api/notifications/send-batch": "Enviar lote de notificaciones",
+        "POST /api/notifications/process-scheduled": "Procesar notificaciones programadas manualmente",
         "GET /api/notifications/history": "Obtener historial de notificaciones",
         "GET /api/notifications/pending": "Obtener notificaciones pendientes",
         "GET /api/notifications/stats": "Obtener estadísticas",
       },
-      admin: {
-        "GET /api/admin/queue-stats": "Estadísticas de las colas",
-        "POST /api/admin/pause-queues": "Pausar todas las colas",
-        "POST /api/admin/resume-queues": "Reanudar todas las colas",
-        "POST /api/admin/clean-queues": "Limpiar colas",
-      },
-      health: {
+      utility: {
         "GET /health": "Estado de salud del servicio",
-      },
+        "POST /api/process-scheduled": "Procesar notificaciones programadas (usar como cron alternativo)"
+      }
     },
+    authentication: "Requerida para todas las rutas /api/* (X-API-Key header)",
     documentation: "Consulta el README.md para ejemplos de uso",
+    notes: [
+      "Esta versión procesa notificaciones directamente sin workers ni colas",
+      "Las notificaciones inmediatas se envían al momento",
+      "Las notificaciones programadas se almacenan y pueden procesarse con /api/process-scheduled",
+      "Usa /api/process-scheduled en un cron job para procesar notificaciones programadas"
+    ]
   })
 })
 
@@ -102,6 +125,27 @@ app.use("*", (req, res) => {
   })
 })
 
+// Función para setup de cron simple (opcional)
+function setupSimpleCron() {
+  if (process.env.ENABLE_AUTO_SCHEDULED === "true") {
+    const cronInterval = parseInt(process.env.CRON_INTERVAL_MINUTES) || 5
+    
+    setInterval(async () => {
+      try {
+        logger.info("Procesando notificaciones programadas automáticamente...")
+        const result = await notificationService.processScheduledNotifications()
+        if (result.processed > 0) {
+          logger.info(`Procesadas ${result.processed} notificaciones programadas`)
+        }
+      } catch (error) {
+        logger.error("Error en cron automático:", error)
+      }
+    }, cronInterval * 60 * 1000) // Convertir minutos a milisegundos
+    
+    logger.info(`Cron automático configurado para ejecutarse cada ${cronInterval} minutos`)
+  }
+}
+
 // Inicializar servidor
 async function startServer() {
   try {
@@ -109,12 +153,24 @@ async function startServer() {
     await initDatabase()
     logger.info("Base de datos inicializada")
 
+    // Setup cron simple si está habilitado
+    setupSimpleCron()
+
     // Iniciar servidor
-    app.listen(PORT, () => {
-      logger.info(`Servidor FCM API iniciado en puerto ${PORT}`)
+    const server = app.listen(PORT, () => {
+      logger.info(`Servidor FCM API (modo directo) iniciado en puerto ${PORT}`)
       logger.info(`Documentación disponible en: http://localhost:${PORT}`)
       logger.info(`Estado de salud en: http://localhost:${PORT}/health`)
+      logger.info("Modo: Procesamiento directo sin workers ni colas")
+      
+      if (process.env.ENABLE_AUTO_SCHEDULED === "true") {
+        logger.info("Procesamiento automático de notificaciones programadas habilitado")
+      } else {
+        logger.info("Para procesar notificaciones programadas usa: POST /api/process-scheduled")
+      }
     })
+
+    return server
   } catch (error) {
     logger.error("Error al iniciar el servidor:", error)
     process.exit(1)
